@@ -29,7 +29,7 @@ if (-not $GEMINI_API_KEY -or -not $GITHUB_TOKEN -or -not $GITHUB_USERNAME -or -n
     exit 1
 }
 
-$SearchTerms = @("Google Gemini", "OpenAI", "Anthropic Claude", "Inteligencia Artificial")
+$SearchTerms = @("Google Gemini when:1d", "OpenAI when:1d", "Anthropic Claude when:1d", "Inteligencia Artificial when:1d")
 $AllNews = @()
 
 Write-Host "Buscando noticias..."
