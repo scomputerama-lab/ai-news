@@ -82,14 +82,29 @@ $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($bodyJson)
 
 $geminiUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$GEMINI_API_KEY"
 
-try {
-    $response = Invoke-RestMethod -Uri $geminiUrl -Method Post -ContentType "application/json; charset=utf-8" -Body $bodyBytes
-    $summaryHtml = $response.candidates[0].content.parts[0].text
-    # Limpiar si Gemini por error incluyÃ³ bloques markdown
-    $summaryHtml = $summaryHtml -replace "^```html`n", "" -replace "`n```$", "" -replace "^````n", ""
-} catch {
-    Write-Host "Error al llamar a Gemini: $_"
-    exit 1
+$maxRetries = 5
+$retryCount = 0
+$success = $false
+$summaryHtml = ""
+
+while (-not $success -and $retryCount -lt $maxRetries) {
+    try {
+        $response = Invoke-RestMethod -Uri $geminiUrl -Method Post -ContentType "application/json; charset=utf-8" -Body $bodyBytes
+        $summaryHtml = $response.candidates[0].content.parts[0].text
+        # Limpiar si Gemini por error incluyÃ³ bloques markdown
+        $summaryHtml = $summaryHtml -replace "^```html`n", "" -replace "`n```$", "" -replace "^````n", ""
+        $success = $true
+    } catch {
+        $retryCount++
+        Write-Host "Error al llamar a Gemini (Intento $retryCount de $maxRetries): $_"
+        if ($retryCount -lt $maxRetries) {
+            Write-Host "Esperando 30 segundos antes de reintentar (posible alta demanda)..."
+            Start-Sleep -Seconds 30
+        } else {
+            Write-Host "Se agotaron los reintentos tras varios fallos 503. Fallo critico."
+            exit 1
+        }
+    }
 }
 
 Write-Host "Construyendo pagina web..."
