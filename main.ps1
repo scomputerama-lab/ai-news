@@ -26,46 +26,59 @@ if ($env:GITHUB_REPOSITORY) {
 }
 
 if (-not $GEMINI_API_KEY -or -not $GITHUB_TOKEN -or -not $GITHUB_USERNAME -or -not $GITHUB_REPO -or -not $WHATSAPP_PHONE -or -not $WHATSAPP_APIKEY) {
-    Write-Host "Error: Faltan variables de entorno. Asegurese de configurar los Secrets."
+    Write-Host "Error: Faltan variables de entorno."
     exit 1
 }
 
 # ---------------------------------------------------------------
-# PASO 1: Buscar noticias (RSS parsing corregido)
+# PASO 1: Buscar noticias recientes
 # ---------------------------------------------------------------
-# Usamos "after:YYYY-MM-DD" para forzar resultados del dia de hoy
-$today     = (Get-Date).ToString("yyyy-MM-dd")
-$yesterday = (Get-Date).AddDays(-1).ToString("yyyy-MM-dd")
-
-$SearchTerms = @(
-    "Google Gemini AI after:$yesterday",
-    "OpenAI after:$yesterday",
-    "Anthropic Claude after:$yesterday",
-    "Inteligencia Artificial after:$yesterday"
-)
+$todayDate = Get-Date
+$currentDate = $todayDate.ToString("dd/MM/yyyy")
+$SearchTerms = @("Google Gemini", "OpenAI", "Anthropic Claude", "Inteligencia Artificial novedades")
 $AllNews = @()
 
-Write-Host "Buscando noticias del dia $today..."
+Write-Host "Buscando noticias recientes..."
 foreach ($term in $SearchTerms) {
-    $encodedTerm = [uri]::EscapeDataString($term)
-    $url = "https://news.google.com/rss/search?q=$encodedTerm&hl=es-419&gl=US&ceid=US:es-419"
+    $query = "$term when:1d"
+    $encodedTerm = [uri]::EscapeDataString($query)
+    $url = 'https://news.google.com/rss/search?q=' + $encodedTerm + '&hl=es-419&gl=US&ceid=US:es-419'
     try {
-        [xml]$xml = Invoke-RestMethod -Uri $url -UseBasicParsing
-        # FIX: acceder correctamente a los items del canal RSS
-        $items = $xml.rss.channel.item | Select-Object -First 4
-        foreach ($item in $items) {
-            if ($item.title -and $item.link) {
-                $pubDate = $item.pubDate
-                $AllNews += "- $($item.title) [$pubDate]`n  Enlace: $($item.link)"
+        $items = Invoke-RestMethod -Uri $url
+        if ($null -ne $items) {
+            $selected = $items | Select-Object -First 3
+            foreach ($item in $selected) {
+                if ($item.title -and $item.link) {
+                    $AllNews += '- ' + $item.title + "`n  Enlace: " + $item.link
+                }
             }
         }
-        Write-Host "  '$term': $($items.Count) noticias encontradas"
     } catch {
         Write-Host "Error buscando '$term': $_"
     }
 }
 
 $NewsText = $AllNews -join "`n`n"
+if ([string]::IsNullOrWhiteSpace($NewsText)) {
+    Write-Host "Sin resultados con when:1d, probando general..."
+    foreach ($term in $SearchTerms) {
+        $encodedTerm = [uri]::EscapeDataString($term)
+        $url = 'https://news.google.com/rss/search?q=' + $encodedTerm + '&hl=es-419&gl=US&ceid=US:es-419'
+        try {
+            $items = Invoke-RestMethod -Uri $url
+            if ($null -ne $items) {
+                $selected = $items | Select-Object -First 2
+                foreach ($item in $selected) {
+                    if ($item.title -and $item.link) {
+                        $AllNews += '- ' + $item.title + "`n  Enlace: " + $item.link
+                    }
+                }
+            }
+        } catch {}
+    }
+    $NewsText = $AllNews -join "`n`n"
+}
+
 if ([string]::IsNullOrWhiteSpace($NewsText)) {
     Write-Host "No se encontraron noticias. Saliendo."
     exit 0
@@ -74,34 +87,18 @@ if ([string]::IsNullOrWhiteSpace($NewsText)) {
 Write-Host "Total noticias recopiladas: $($AllNews.Count)"
 
 # ---------------------------------------------------------------
-# PASO 2: Generar resumen con Gemini (con reintentos anti-503)
+# PASO 2: Generar resumen con Gemini
 # ---------------------------------------------------------------
 Write-Host "Generando resumen con Gemini..."
 
-$prompt = @"
-Eres un experto analista en Inteligencia Artificial. Hoy es $today.
-
-A continuacion te proporciono titulares de noticias RECIENTES de hoy sobre IA.
-Redacta un boletin ejecutivo del dia, enfocado en Google (Gemini), OpenAI y Anthropic.
-Sintetiza, no repitas titulares literalmente. Escribe en espanol.
-
-INSTRUCCIONES DE FORMATO (OBLIGATORIO):
-- Responde UNICAMENTE con HTML usando etiquetas: <h2>, <h3>, <p>, <ul>, <li>, <a>
-- NO uses <html>, <head>, <body>
-- NO uses bloques de codigo markdown (no pongas ```html)
-- Incluye los enlaces originales en etiquetas <a href="...">
-- Empieza directamente con el contenido HTML
-
-Noticias del dia ($today):
-$NewsText
-"@
+$prompt = "Eres un experto analista en Inteligencia Artificial. Hoy es $currentDate.`n`nNoticias recientes:`n$NewsText`n`nINSTRUCCIONES IMPORTANTES DE FORMATO (OBLIGATORIO):`n- Responde UNICAMENTE con etiquetas HTML validas: <h2>, <h3>, <p>, <ul>, <li>, <a>`n- NO uses <html>, <head>, <body> ni doctype`n- NO uses bloques markdown ni comillas invertidas`n- Enlaza las fuentes usando <a href='...' target='_blank'>`n- Empieza directamente con el contenido HTML."
 
 $bodyObj = @{
     contents = @(@{ parts = @(@{ text = $prompt }) })
 }
 $bodyJson  = $bodyObj | ConvertTo-Json -Depth 10
 $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($bodyJson)
-$geminiUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$GEMINI_API_KEY"
+$geminiUrl = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=' + $GEMINI_API_KEY
 
 $maxRetries  = 5
 $retryCount  = 0
@@ -110,18 +107,17 @@ $summaryHtml = ""
 
 while (-not $success -and $retryCount -lt $maxRetries) {
     try {
-        $response    = Invoke-RestMethod -Uri $geminiUrl -Method Post -ContentType "application/json; charset=utf-8" -Body $bodyBytes
+        $response    = Invoke-RestMethod -Uri $geminiUrl -Method Post -ContentType "application/json; charset=utf-8" -Body $bodyBytes -TimeoutSec 60
         $summaryHtml = $response.candidates[0].content.parts[0].text
-        # Limpiar si Gemini incluyo bloques markdown por error
-        $summaryHtml = $summaryHtml -replace "(?s)^```html\s*", "" -replace "(?s)\s*```\s*$", ""
+        $summaryHtml = $summaryHtml -replace '(?s)^```html\s*', '' -replace '(?s)\s*```\s*$', ''
         $success     = $true
-        Write-Host "Resumen generado correctamente."
+        Write-Host "Resumen generado con exito por Gemini."
     } catch {
         $retryCount++
         Write-Host "Error Gemini (Intento $retryCount/$maxRetries): $_"
         if ($retryCount -lt $maxRetries) {
-            Write-Host "Esperando 30 segundos y reintentando..."
-            Start-Sleep -Seconds 30
+            Write-Host "Esperando 20 segundos y reintentando..."
+            Start-Sleep -Seconds 20
         } else {
             Write-Host "Fallo critico: se agotaron los reintentos de Gemini."
             exit 1
@@ -133,9 +129,6 @@ while (-not $success -and $retryCount -lt $maxRetries) {
 # PASO 3: Construir pagina HTML
 # ---------------------------------------------------------------
 Write-Host "Construyendo pagina web..."
-$currentDate  = (Get-Date).ToString("dd/MM/yyyy")
-$currentYear  = (Get-Date).Year
-
 $htmlTemplate = @"
 <!DOCTYPE html>
 <html lang="es">
@@ -165,7 +158,7 @@ $htmlTemplate = @"
                 radial-gradient(at 100% 0%, rgba(139, 92, 246, 0.15) 0, transparent 50%);
         }
         .container { max-width: 800px; margin: 0 auto; }
-        header { text-align: center; margin-bottom: 3rem; animation: fadeInDown 1s ease-out; }
+        header { text-align: center; margin-bottom: 3rem; }
         h1 {
             font-size: 2.5rem; font-weight: 800;
             background: linear-gradient(to right, #38bdf8, #8b5cf6);
@@ -179,7 +172,6 @@ $htmlTemplate = @"
             border: 1px solid rgba(255, 255, 255, 0.1);
             border-radius: 1.5rem; padding: 2.5rem;
             box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
-            animation: fadeInUp 1s ease-out;
         }
         h2 { color: #f1f5f9; font-size: 1.5rem; margin-top: 2rem; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 0.5rem; }
         h2:first-of-type { margin-top: 0; }
@@ -190,8 +182,6 @@ $htmlTemplate = @"
         li { margin-bottom: 1rem; color: #cbd5e1; }
         p { color: #cbd5e1; }
         footer { text-align: center; margin-top: 2rem; color: #475569; font-size: 0.85rem; }
-        @keyframes fadeInDown { from { opacity: 0; transform: translateY(-20px); } to { opacity: 1; transform: translateY(0); } }
-        @keyframes fadeInUp   { from { opacity: 0; transform: translateY(20px);  } to { opacity: 1; transform: translateY(0); } }
     </style>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
 </head>
@@ -204,7 +194,7 @@ $htmlTemplate = @"
         <div class="content-card">
             $summaryHtml
         </div>
-        <footer>Generado automaticamente el $currentDate &mdash; &copy; $currentYear</footer>
+        <footer>Generado el $currentDate</footer>
     </div>
 </body>
 </html>
@@ -216,10 +206,10 @@ $htmlTemplate = @"
 Write-Host "Subiendo a GitHub Pages..."
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$githubUrl = "https://api.github.com/repos/$GITHUB_USERNAME/$GITHUB_REPO/contents/index.html"
+$githubUrl = 'https://api.github.com/repos/' + $GITHUB_USERNAME + '/' + $GITHUB_REPO + '/contents/index.html'
 $headers   = @{
-    "Authorization" = "Bearer $GITHUB_TOKEN"
-    "Accept"        = "application/vnd.github.v3+json"
+    'Authorization' = 'Bearer ' + $GITHUB_TOKEN
+    'Accept'        = 'application/vnd.github.v3+json'
 }
 
 $sha = $null
@@ -230,7 +220,7 @@ try {
 
 $base64Content = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($htmlTemplate))
 $body = @{
-    message = "Resumen diario IA: $currentDate"
+    message = 'Resumen diario IA: ' + $currentDate
     content = $base64Content
 }
 if ($sha) { $body.sha = $sha }
@@ -248,15 +238,21 @@ try {
 # PASO 5: Enviar notificacion WhatsApp
 # ---------------------------------------------------------------
 Write-Host "Enviando notificacion por WhatsApp..."
-$pageUrl        = "https://$GITHUB_USERNAME.github.io/$GITHUB_REPO/"
-$message        = "📰 ¡Tu resumen diario de IA del $currentDate está listo! 🚀`nVisita el siguiente enlace para leerlo con diseño premium:`n$pageUrl"
+$pageUrl = 'https://' + $GITHUB_USERNAME + '.github.io/' + $GITHUB_REPO + '/'
+$prefixBytes = [Convert]::FromBase64String("8J+kliDCoVR1IHJlc3VtZW4gZGlhcmlvIGRlIElBIGRlbCA=")
+$suffixBytes = [Convert]::FromBase64String("IGVzdMOhIGxpc3RvISDwn5qADQpWaXNpdGEgZWwgc2lndWllbnRlIGVubGFjZSBwYXJhIGxlZXJsbyBjb24gZGlzZcOxbyBwcmVtaXVtOg0K")
+$prefix = [System.Text.Encoding]::UTF8.GetString($prefixBytes)
+$suffix = [System.Text.Encoding]::UTF8.GetString($suffixBytes)
+$message = $prefix + $currentDate + $suffix + $pageUrl
+
 $encodedMessage = [uri]::EscapeDataString($message)
 $encodedPhone   = [uri]::EscapeDataString($WHATSAPP_PHONE)
-$whatsappUrl    = "https://api.callmebot.com/whatsapp.php?phone=$encodedPhone&text=$encodedMessage&apikey=$WHATSAPP_APIKEY"
+$whatsappUrl    = 'https://api.callmebot.com/whatsapp.php?phone=' + $encodedPhone + '&text=' + $encodedMessage + '&apikey=' + $WHATSAPP_APIKEY
 
 try {
-    Invoke-RestMethod -Uri $whatsappUrl -Method Get | Out-Null
-    Write-Host "Notificacion WhatsApp enviada!"
+    $respWa = Invoke-RestMethod -Uri $whatsappUrl -Method Get
+    Write-Host "Respuesta CallMeBot: $respWa"
+    Write-Host "WhatsApp enviado exitosamente!"
 } catch {
     Write-Host "Error al enviar WhatsApp: $_"
 }
